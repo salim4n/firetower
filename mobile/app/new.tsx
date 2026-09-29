@@ -186,6 +186,7 @@ export default function NewWorkspace() {
       >
         <Field label="Name" hint="What this branch is for">
           <TextInput
+            testID="workspace-name"
             value={name}
             onChangeText={setName}
             placeholder="auth refactor"
@@ -221,6 +222,7 @@ export default function NewWorkspace() {
               </View>
             ))}
             <Pressable
+              testID="workspace-repository"
               onPress={() => setOpen("repo")}
               style={{ minHeight: 48 }}
               className="flex-row items-center gap-2 rounded-xl border border-dashed border-line px-3.5 py-3"
@@ -253,11 +255,13 @@ export default function NewWorkspace() {
         <Field label="Where it runs">
           <View className="gap-2">
             <Trigger
+              testID="workspace-host"
               value={host ? `${host.name} · ${host.cpus ?? "?"} vCPU` : undefined}
               placeholder="Choose a machine"
               onPress={() => setOpen("host")}
             />
             <Trigger
+              testID="workspace-agent"
               value={agents.find((a) => a.kind === agent)?.label}
               placeholder="Choose an agent"
               onPress={() => setOpen("agent")}
@@ -267,6 +271,7 @@ export default function NewWorkspace() {
 
         <Field label="Account" hint="Whose subscription this runs on">
           <Trigger
+            testID="workspace-account"
             value={account?.name}
             placeholder={agent ? "Choose an account" : "Pick an agent first"}
             onPress={() => agent && setOpen("account")}
@@ -299,6 +304,7 @@ export default function NewWorkspace() {
             <Text className="mb-2 text-center font-sans text-meta text-brick">{wrong}</Text>
           ) : null}
           <Pressable
+            testID="start-workspace"
             disabled={!ready}
             onPress={async () => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);

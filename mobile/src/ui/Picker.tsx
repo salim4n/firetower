@@ -67,16 +67,19 @@ export function Field({
 }
 
 export function Trigger({
+  testID,
   value,
   placeholder,
   onPress,
 }: {
+  testID?: string;
   value?: string;
   placeholder: string;
   onPress: () => void;
 }) {
   return (
     <Pressable
+      testID={testID}
       onPress={onPress}
       style={{ minHeight: 48 }}
       className="flex-row items-center justify-between rounded-xl border border-line bg-ground px-3.5 py-3"
