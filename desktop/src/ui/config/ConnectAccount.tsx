@@ -150,7 +150,7 @@ export function ConnectAccount({
           )}
 
           {made && device && !confirmed && (failed || (!login.data && !login.isPending)) && (
-            <p className="text-ui text-brick">{failed ? "Sign-in could not be saved. This identity may already be connected; check the account list or try again." : "The sign-in did not start."}</p>
+            <p className="text-ui text-brick">{failed ? "Sign-in did not finish. The code may have expired or been declined, or this identity may already be connected. Check the account list or try again with a new code." : "The sign-in did not start."}</p>
           )}
 
           {ready && (

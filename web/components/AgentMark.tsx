@@ -52,6 +52,9 @@ export function AgentMark({
     case "KimiCode":
       return <svg {...common} viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M4 3v10M12 3L5 8l7 5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 
+    case "GrokBuild":
+      return <svg {...common}><path d="M12.5 4.3A5.5 5.5 0 1 0 13 10H8V8h5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+
     case "Codex":
       return (
         <svg {...common}>
@@ -85,6 +88,7 @@ export const AGENT_LABEL: Record<Agent, string> = {
   ClaudeCode: "Claude Code",
   Codex: "Codex",
   KimiCode: "Kimi Code",
+  GrokBuild: "Grok Build",
   Shell: "Shell",
 };
 
@@ -93,5 +97,6 @@ export const AGENT_SHORT: Record<Agent, string> = {
   ClaudeCode: "claude",
   Codex: "codex",
   KimiCode: "kimi",
+  GrokBuild: "grok",
   Shell: "shell",
 };

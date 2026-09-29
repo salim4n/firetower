@@ -38,6 +38,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCreateSession } from "~/api/generated/sessions/sessions";
 import type { Agent, Share } from "~/api/generated/model";
 import { useAccounts, useAgents, useHosts, useRepos, why } from "~/data";
+import { usable } from "~/api/accounts";
 import { leaveDraft } from "~/workspace/draft";
 import { takeConnected } from "~/workspace/connected";
 import { Field, Picker, Trigger, type Choice } from "~/ui/Picker";
@@ -137,6 +138,7 @@ export default function NewWorkspace() {
 
   const host = hosts.find((h) => h.id === hostId);
   const account = accounts.find((a) => a.id === accountId);
+  const selectedAgent = agents.find((a) => a.kind === agent);
   const chosenRepos = repos.filter((r) => picked.includes(r.id));
 
   /* Only accounts for the agent that will run. Offering a Codex login to a
@@ -151,12 +153,18 @@ export default function NewWorkspace() {
           id: a.id,
           label: a.name,
           detail: a.identity ?? (a.isDefault ? "default" : undefined),
-          blocked: a.credentialSet ? undefined : "No credential set",
+          blocked: !a.enabled ? "Account disabled" :
+            a.state === "pending" ? "Sign-in pending" :
+            a.state !== "connected" ? "Sign-in failed — reconnect from the web or desktop" :
+            !a.credentialSet ? "No credential set" : undefined,
         })),
     [agent, accounts],
   );
 
-  const ready = name.trim().length > 0 && picked.length > 0 && !!hostId && !!agent && !create.isPending;
+  const ready = name.trim().length > 0 && picked.length > 0 && !!hostId && !!agent &&
+    !!selectedAgent?.enabled && !!selectedAgent.supported && !!selectedAgent.hosts.find((h) => h.hostId === hostId)?.installed &&
+    (!selectedAgent.needsCredential || (accountId ? !!account && usable(account) : selectedAgent.credentialSet)) &&
+    !create.isPending;
 
   return (
     <View className="flex-1 bg-ground" style={{ paddingTop: insets.top }}>
@@ -178,6 +186,7 @@ export default function NewWorkspace() {
       >
         <Field label="Name" hint="What this branch is for">
           <TextInput
+            testID="workspace-name"
             value={name}
             onChangeText={setName}
             placeholder="auth refactor"
@@ -213,6 +222,7 @@ export default function NewWorkspace() {
               </View>
             ))}
             <Pressable
+              testID="workspace-repository"
               onPress={() => setOpen("repo")}
               style={{ minHeight: 48 }}
               className="flex-row items-center gap-2 rounded-xl border border-dashed border-line px-3.5 py-3"
@@ -245,11 +255,13 @@ export default function NewWorkspace() {
         <Field label="Where it runs">
           <View className="gap-2">
             <Trigger
+              testID="workspace-host"
               value={host ? `${host.name} · ${host.cpus ?? "?"} vCPU` : undefined}
               placeholder="Choose a machine"
               onPress={() => setOpen("host")}
             />
             <Trigger
+              testID="workspace-agent"
               value={agents.find((a) => a.kind === agent)?.label}
               placeholder="Choose an agent"
               onPress={() => setOpen("agent")}
@@ -259,6 +271,7 @@ export default function NewWorkspace() {
 
         <Field label="Account" hint="Whose subscription this runs on">
           <Trigger
+            testID="workspace-account"
             value={account?.name}
             placeholder={agent ? "Choose an account" : "Pick an agent first"}
             onPress={() => agent && setOpen("account")}
@@ -291,6 +304,7 @@ export default function NewWorkspace() {
             <Text className="mb-2 text-center font-sans text-meta text-brick">{wrong}</Text>
           ) : null}
           <Pressable
+            testID="start-workspace"
             disabled={!ready}
             onPress={async () => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -386,8 +400,11 @@ export default function NewWorkspace() {
         choices={agents.map((a) => ({
           id: a.kind,
           label: a.label,
-          detail: a.hosts?.[0]?.version ?? undefined,
-          blocked: a.supported ? undefined : "Not supported on this server",
+          detail: a.hosts.find((h) => h.hostId === hostId)?.version ?? undefined,
+          blocked: !a.enabled ? "Not offered on this server" :
+            !a.supported ? "Not supported on this server" :
+            !hostId ? "Choose a machine first" :
+            !a.hosts.find((h) => h.hostId === hostId)?.installed ? "Not installed on this machine" : undefined,
         }))}
         onPick={(id) => {
           setAgent(id);

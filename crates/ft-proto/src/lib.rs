@@ -45,7 +45,8 @@ use serde::{Deserialize, Serialize};
 /// 15 — KimiCode and its ACP journal require an ACP-aware worker.
 /// 16 — ACP configuration commands require a worker that can apply them.
 /// 17 — signing in names its agent, so Kimi can use the device flow too.
-pub const PROTOCOL_VERSION: u32 = 17;
+/// 18 — GrokBuild is a new agent variant in worker frames and needs an ACP-aware worker.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 mod codec;
 pub use codec::{Codec, CodecError, FrameReader, FrameWriter};

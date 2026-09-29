@@ -1,3 +1,8 @@
+# ACP providers
+
+Grok Build uses the same ACP bridge with its own pinned binary and account
+connection. See [Grok Build setup and acceptance](grok-build.md).
+
 # Kimi Code through ACP (experimental)
 
 Firetower drives the Kimi Code CLI through `kimi acp`. This is an additional

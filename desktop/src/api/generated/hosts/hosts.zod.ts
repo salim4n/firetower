@@ -387,7 +387,7 @@ export const HostReadinessParams = zod.object({
 })
 
 export const HostReadinessQueryParams = zod.object({
-  "agent": zod.enum(['ClaudeCode', 'Codex', 'KimiCode', 'Shell']).optional()
+  "agent": zod.enum(['ClaudeCode', 'Codex', 'KimiCode', 'GrokBuild', 'Shell']).optional()
 })
 
 export const HostReadinessResponse = zod.object({

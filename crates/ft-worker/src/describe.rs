@@ -322,7 +322,9 @@ fn invocation(
         }
         // Not offered, and has no answer to give. Reached only by a session
         // recorded before `Shell` stopped being startable.
-        ft_core::Agent::KimiCode => unreachable!("ACP descriptions are rejected before invocation"),
+        ft_core::Agent::KimiCode | ft_core::Agent::GrokBuild => {
+            unreachable!("ACP descriptions are rejected before invocation")
+        }
         ft_core::Agent::Shell => {
             command.args(["-c", "exit 1"]);
         }

@@ -1,0 +1,101 @@
+# Grok Build on an installed native Expo app and a matching live Firetower.
+# The account must already be connected through Firetower's device flow and
+# the named repository must be disposable: this asks Grok to write one file.
+#
+# Boot an iOS simulator or Android emulator/device, install this commit's app,
+# and pass ADDRESS, USER, PASS, REPO, HOST, and ACCOUNT with `maestro test -e`.
+# A passing browser viewport is not a substitute for this native run.
+appId: com.usefiretower.app
+---
+- runFlow: connect.yaml
+
+- tapOn:
+    id: "new-workspace"
+- assertVisible: "New workspace"
+- tapOn:
+    id: "workspace-name"
+- inputText: "grok mobile acceptance"
+- hideKeyboard
+
+- tapOn:
+    id: "workspace-repository"
+- tapOn: "${REPO}"
+# Repository selection is multi-select, so dismiss its sheet after choosing.
+- tapOn:
+    point: "50%, 10%"
+- tapOn:
+    id: "workspace-host"
+- tapOn: "${HOST}"
+- tapOn:
+    id: "workspace-agent"
+- tapOn: "Grok Build"
+- scrollUntilVisible:
+    element:
+      id: "workspace-account"
+    direction: DOWN
+- tapOn:
+    id: "workspace-account"
+- tapOn: "${ACCOUNT}"
+- takeScreenshot: grok-mobile-ready
+- tapOn:
+    id: "start-workspace"
+
+- extendedWaitUntil:
+    visible: "Answer the agent"
+    timeout: 120000
+- tapOn:
+    id: "composer"
+- inputText: "Use the terminal tool to run printf grok-mobile-proof | tee mobile-proof.txt in this disposable workspace. Then reply with GROK_MOBILE_OK."
+- hideKeyboard
+- tapOn:
+    id: "send"
+- extendedWaitUntil:
+    visible: "Allow"
+    timeout: 180000
+- takeScreenshot: grok-mobile-approval
+- tapOn: "Allow"
+- extendedWaitUntil:
+    visible:
+      id: "assistant-message"
+      containsDescendants:
+        - text: "GROK_MOBILE_OK"
+    timeout: 180000
+- runFlow:
+    when:
+      visible:
+        id: "tool-group"
+    commands:
+      - tapOn:
+          id: "tool-group"
+- assertVisible:
+    id: "tool-call"
+- tapOn:
+    id: "tool-toggle"
+- assertVisible:
+    id: "tool-input"
+- assertVisible:
+    id: "tool-output"
+- takeScreenshot: grok-mobile-tool-and-reply
+
+- tapOn:
+    id: "composer"
+- inputText: "Delegate reading README.md to a subagent, then summarize its result and say GROK_MOBILE_SUBAGENT_OK."
+- hideKeyboard
+- tapOn:
+    id: "send"
+- extendedWaitUntil:
+    visible:
+      id: "subagent-call"
+    timeout: 180000
+- takeScreenshot: grok-mobile-subagent-visible
+- extendedWaitUntil:
+    visible:
+      id: "assistant-message"
+      containsDescendants:
+        - text: "GROK_MOBILE_SUBAGENT_OK"
+    timeout: 180000
+- assertVisible:
+    id: "subagent-call"
+    containsDescendants:
+      - text: "completed"
+- takeScreenshot: grok-mobile-subagent

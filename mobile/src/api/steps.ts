@@ -161,6 +161,8 @@ export type Summary = {
   text: string;
   /** How many of them failed. */
   failed: number;
+  /** How many were refused by the approver. */
+  declined: number;
 };
 
 /** The same verbs `Tool` puts in front of a single row. */
@@ -190,6 +192,7 @@ const PLURAL: Partial<Record<ItemKind, [string, string]>> = {
  */
 export function summarise(items: Item[]): Summary {
   const failed = items.filter((i) => i.status === "Failed").length;
+  const declined = items.filter((i) => i.status === "Declined").length;
   const kinds = new Set(items.map((i) => i.kind));
 
   if (kinds.size === 1) {
@@ -200,9 +203,10 @@ export function summarise(items: Item[]): Summary {
         verb: VERB[kind] ?? "did",
         text: `${items.length} ${items.length === 1 ? names[0] : names[1]}`,
         failed,
+        declined,
       };
     }
   }
 
-  return { verb: "did", text: `${items.length} steps`, failed };
+  return { verb: "did", text: `${items.length} steps`, failed, declined };
 }

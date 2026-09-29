@@ -14,7 +14,18 @@ use tokio::process::Command;
 /// under it — and one of those answering is as good as one the machine came
 /// with. Which of them answered is the version reported.
 pub async fn probe(state: &Path) -> Vec<AgentPresence> {
-    probe_on(&crate::runtime::path_with_agents(state).await).await
+    let path = crate::runtime::path_with_agents(state).await;
+    let mut out = probe_on(&path).await;
+    if let Some(grok) = out.iter_mut().find(|agent| agent.kind == Agent::GrokBuild) {
+        grok.version = match crate::runtime::grok_binary(state).await {
+            Ok(binary) => version_of(&binary.to_string_lossy(), &path).await,
+            Err(_) => None,
+        };
+        grok.installed = grok.version.is_some();
+        grok.logged_in = None;
+        grok.account = None;
+    }
+    out
 }
 
 async fn probe_on(path: &std::ffi::OsStr) -> Vec<AgentPresence> {
@@ -47,6 +58,9 @@ async fn probe_on(path: &std::ffi::OsStr) -> Vec<AgentPresence> {
 /// the moment before a launch, where the alternative to knowing is starting a
 /// process that isn't there and reporting it as an agent that never woke up.
 pub async fn present(state: &Path, kind: Agent) -> bool {
+    if kind == Agent::GrokBuild {
+        return crate::runtime::grok_binary(state).await.is_ok();
+    }
     present_on(&crate::runtime::path_with_agents(state).await, kind).await
 }
 

@@ -16,7 +16,7 @@ import { useState } from "react";
 import { Image, Pressable, Text, View } from "react-native";
 import { ChevronDown, ChevronRight, FileDiff, FileText, Search, Terminal, Users } from "lucide-react-native";
 import type { Item, Task } from "~/api/conversation";
-import { delegated, fold, mainline, type Row } from "~/api/steps";
+import { delegated, fold, mainline, summarise, type Row } from "~/api/steps";
 import { Code, Prose } from "~/ui/Prose";
 import { color } from "~/design/tokens.generated";
 
@@ -29,16 +29,30 @@ const GLYPH = {
 
 /** A verb and an argument. What a tool call is, in one line. */
 function Tool({ item }: { item: Item }) {
+  const [open, setOpen] = useState(false);
   const Icon = GLYPH[item.kind as keyof typeof GLYPH] ?? Terminal;
   const pictures = item.images ?? [];
+  const failed = item.status === "Failed" || item.status === "Declined";
   return (
-    <View className="py-1">
-      <View className="flex-row items-center gap-2">
-        <Icon color={color.mute} size={12} />
-        <Text numberOfLines={1} className="flex-1 font-mono text-meta text-dim">
+    <View testID="tool-call" className="py-1">
+      <Pressable testID="tool-toggle" onPress={() => setOpen((was) => !was)} className="flex-row items-center gap-2" hitSlop={6}>
+        <Icon color={failed ? color.brick : color.mute} size={12} />
+        <Text numberOfLines={1} className={`flex-1 font-mono text-meta ${failed ? "text-brick" : "text-dim"}`}>
           {item.title}
         </Text>
-      </View>
+        <Text className={`font-sans text-meta ${failed ? "text-brick" : "text-mute"}`}>
+          {item.status?.toLowerCase() ?? "working"}
+        </Text>
+        {open ? <ChevronDown color={color.mute} size={12} /> : <ChevronRight color={color.mute} size={12} />}
+      </Pressable>
+      {open && (item.input !== undefined || item.output) ? (
+        <View testID="tool-detail" className="gap-1.5 pb-1 pl-5 pt-2">
+          {item.input !== undefined ? (
+            <View testID="tool-input"><Code text={JSON.stringify(item.input, null, 2) ?? String(item.input)} /></View>
+          ) : null}
+          {item.output ? <View testID="tool-output"><Code text={item.output} tint /></View> : null}
+        </View>
+      ) : null}
       {/* What the step handed back, when it handed back a picture. Shown
           whole rather than cropped — a screenshot is captured to be read,
           and a square of the middle of one says nothing. */}
@@ -70,11 +84,14 @@ function Rail({ children }: { children: React.ReactNode }) {
 
 function Group({ items }: { items: Item[] }) {
   const [open, setOpen] = useState(false);
+  const summary = summarise(items);
   return (
     <Rail>
-      <Pressable onPress={() => setOpen((o) => !o)} className="flex-row items-center gap-2 py-1.5" hitSlop={6}>
+      <Pressable testID="tool-group" onPress={() => setOpen((o) => !o)} className="flex-row items-center gap-2 py-1.5" hitSlop={6}>
         {open ? <ChevronDown color={color.mute} size={12} /> : <ChevronRight color={color.mute} size={12} />}
-        <Text className="font-sans text-meta text-mute">{items.length} steps</Text>
+        <Text className="font-sans text-meta text-mute">{summary.verb} {summary.text}</Text>
+        {summary.failed > 0 ? <Text className="font-sans text-meta text-brick">{summary.failed} failed</Text> : null}
+        {summary.declined > 0 ? <Text className="font-sans text-meta text-brick">{summary.declined} declined</Text> : null}
       </Pressable>
       {open ? <View className="pb-1">{items.map((i) => <Tool key={i.id} item={i} />)}</View> : null}
     </Rail>
@@ -171,7 +188,7 @@ function Delegated({ item, items, tasks }: { item: Item; items: Item[]; tasks: T
 
   return (
     <Rail>
-      <Pressable onPress={() => setOpen((o) => !o)} className="py-1.5" hitSlop={6}>
+      <Pressable testID="subagent-call" onPress={() => setOpen((o) => !o)} className="py-1.5" hitSlop={6}>
         <View className="flex-row items-center gap-2">
           <Users color={failed ? color.brick : color.mute} size={12} />
           <Text className="font-sans text-meta text-mute">sent</Text>
@@ -180,6 +197,10 @@ function Delegated({ item, items, tasks }: { item: Item; items: Item[]; tasks: T
             className={`flex-1 font-mono text-meta ${failed ? "text-brick" : "text-dim"}`}
           >
             {description}
+          </Text>
+          {task?.agent ? <Text numberOfLines={1} className="max-w-20 font-mono text-meta text-mute">{task.agent}</Text> : null}
+          <Text className={`font-sans text-meta ${failed ? "text-brick" : "text-mute"}`}>
+            {(task?.status ?? item.status ?? "working").toLowerCase()}
           </Text>
           {open ? <ChevronDown color={color.mute} size={12} /> : <ChevronRight color={color.mute} size={12} />}
         </View>
@@ -222,7 +243,7 @@ function Line({ row, items, tasks }: { row: Row; items?: Item[]; tasks?: Task[] 
       return <Said item={item} />;
     case "AssistantMessage":
       return (
-        <View className="my-2">
+        <View testID="assistant-message" className="my-2">
           <Prose text={item.text} />
         </View>
       );
