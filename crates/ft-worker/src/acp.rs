@@ -23,11 +23,34 @@ struct Saved {
     carry: Option<String>,
 }
 
-pub async fn run(session: &str, workspace: &Path) -> Result<()> {
-    let mut command = Command::new("kimi");
-    command.arg("acp");
-    serve(
+pub async fn run(kind: ft_core::Agent, session: &str, workspace: &Path) -> Result<()> {
+    let command = match kind {
+        ft_core::Agent::KimiCode => {
+            let mut command = Command::new("kimi");
+            command.arg("acp");
+            command
+        }
+        ft_core::Agent::GrokBuild => {
+            let root = std::env::var_os(ft_core::WORKER_ROOT_ENV)
+                .context("Firetower worker root is missing for Grok Build")?;
+            let binary = crate::runtime::grok_binary(Path::new(&root)).await?;
+            let mut command = Command::new(binary);
+            command.args([
+                "--no-auto-update",
+                "--permission-mode",
+                "default",
+                "agent",
+                "--no-leader",
+                "stdio",
+            ]);
+            command.env_remove("XAI_API_KEY");
+            command
+        }
+        _ => bail!("{} has no ACP transport", kind.label()),
+    };
+    serve_for(
         command,
+        kind,
         session,
         workspace,
         BufReader::new(tokio::io::stdin()),
@@ -39,7 +62,30 @@ pub async fn run(session: &str, workspace: &Path) -> Result<()> {
 /// The process/stdio seam also lets integration tests drive a real fixture
 /// subprocess without installing an agent or borrowing somebody's credentials.
 pub async fn serve<R, W>(
+    command: Command,
+    session: &str,
+    workspace: &Path,
+    input: R,
+    output: W,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    serve_for(
+        command,
+        ft_core::Agent::KimiCode,
+        session,
+        workspace,
+        input,
+        output,
+    )
+    .await
+}
+
+pub async fn serve_for<R, W>(
     mut command: Command,
+    kind: ft_core::Agent,
     session: &str,
     workspace: &Path,
     input: R,
@@ -65,11 +111,17 @@ where
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .context("starting Kimi ACP; install kimi and run kimi login as the worker user")?;
+            .with_context(|| {
+                format!(
+                    "starting {} ACP; install and connect the account in Firetower",
+                    kind.label()
+                )
+            })?;
         let mut stdin = child.stdin.take().context("ACP stdin")?;
         let mut stdout = BufReader::new(child.stdout.take().context("ACP stdout")?).lines();
         let result = connection(
             session,
+            kind,
             workspace,
             &epoch,
             &mut stdin,
@@ -200,6 +252,7 @@ async fn save(path: &Path, value: &Saved) -> Result<()> {
 
 async fn connection<R, W>(
     session: &str,
+    kind: ft_core::Agent,
     workspace: &Path,
     epoch: &str,
     stdin: &mut ChildStdin,
@@ -225,7 +278,27 @@ where
         init["protocolVersion"] == 1,
         "ACP agent did not negotiate protocol version 1"
     );
+    if kind == ft_core::Agent::GrokBuild {
+        anyhow::ensure!(
+            init["authMethods"].as_array().is_some_and(|methods| methods.iter().any(|method| method["id"] == "cached_token")),
+            "Grok Build has no connected subscription in this session; connect an account in Firetower"
+        );
+        let auth = exchange(
+            stdin,
+            stdout,
+            out,
+            rpc(
+                0,
+                "authenticate",
+                json!({"methodId":"cached_token", "_meta":{"headless":true}}),
+            ),
+            false,
+        )
+        .await?;
+        result(&auth).context("Grok Build subscription authentication failed")?;
+    }
     let can_load = init["agentCapabilities"]["loadSession"] == true;
+    let can_list = init["agentCapabilities"]["sessionCapabilities"]["list"].is_object();
     let cwd = workspace.canonicalize()?.to_string_lossy().into_owned();
     let mut loaded = false;
     if let Some(saved) = &previous {
@@ -244,11 +317,37 @@ where
             .await?;
             // Kimi 2.0.2's explicit missing-session response, verified against
             // the binary. Do not classify arbitrary invalid params as loss.
-            let missing = response["error"]["code"] == -32602
+            let kimi_missing = response["error"]["code"] == -32602
                 && response["error"]["data"]["sessionId"] == saved.session
                 && response["error"]["message"]
                     .as_str()
                     .is_some_and(|s| s.starts_with("Invalid params: Unknown sessionId:"));
+            // Grok 1.0.44 returns FS_NOT_FOUND without naming the session.
+            // Confirm absence through its advertised list capability before
+            // carrying history; an unrelated missing file must stay an error.
+            let grok_not_found = kind == ft_core::Agent::GrokBuild
+                && can_list
+                && response["error"]["code"] == -32603
+                && response["error"]["data"]["code"] == "FS_NOT_FOUND";
+            let grok_missing = if grok_not_found {
+                let listed = exchange(
+                    stdin,
+                    stdout,
+                    out,
+                    rpc(0, "session/list", json!({"cwd":cwd})),
+                    false,
+                )
+                .await?;
+                let sessions = result(&listed)?["sessions"]
+                    .as_array()
+                    .context("Grok Build session/list returned no sessions array")?;
+                !sessions
+                    .iter()
+                    .any(|session| session["sessionId"] == saved.session)
+            } else {
+                false
+            };
+            let missing = kimi_missing || grok_missing;
             if !missing {
                 result(&response)?;
                 loaded = true;
@@ -271,7 +370,7 @@ where
             .filter(|s| !s.is_empty())
             .context("ACP session/new returned no sessionId")?
             .to_owned();
-        let carry = crate::history::carry(workspace, session, ft_core::Agent::KimiCode).await?;
+        let carry = crate::history::carry(workspace, session, kind).await?;
         Saved { session: id, carry }
     };
     save(&state_path, &saved).await?;
@@ -286,7 +385,7 @@ where
     let mut input = input.lines();
     let mut next_id = 4;
     let mut active: Option<u64> = None;
-    let mut configuring: Option<Value> = None;
+    let mut configuring: Option<(Value, tokio::time::Instant)> = None;
     let mut pending: HashMap<String, Value> = HashMap::new();
     let mut cancel_deadline = None;
     let mut queued = VecDeque::new();
@@ -340,10 +439,10 @@ where
                     }
                     Input::Configure { id, config_id, value } => {
                         if configuring.is_some() {
-                            record(out, Record::ConfigurationRejected { id, detail: "Another setting change is still awaiting Kimi's response".into() }).await?;
+                            record(out, Record::ConfigurationRejected { id, detail: "Another setting change is still awaiting the agent's response".into() }).await?;
                             continue;
                         }
-                        configuring = Some(json!(id));
+                        configuring = Some((json!(id), tokio::time::Instant::now() + Duration::from_secs(30)));
                         // A configuration response is journalled like every
                         // other RPC. Keep reading prompts and permissions while
                         // it is outstanding; it is not a conversation turn.
@@ -364,7 +463,7 @@ where
                     }
                 }
                 record(out, Record::Received { message: message.clone(), replay: false }).await?;
-                if message.get("method").is_none() && configuring.as_ref().is_some_and(|id| *id == message["id"]) {
+                if message.get("method").is_none() && configuring.as_ref().is_some_and(|(id, _)| *id == message["id"]) {
                     configuring = None;
                 }
                 if message.get("method").is_none() && active.is_some_and(|id| message["id"] == id) {
@@ -375,6 +474,11 @@ where
             }
             _ = async { if let Some(deadline) = cancel_deadline { tokio::time::sleep_until(deadline).await } else { std::future::pending::<()>().await } } => {
                 bail!("ACP agent did not acknowledge cancellation; its connection was stopped");
+            }
+            _ = async { if let Some((_, deadline)) = &configuring { tokio::time::sleep_until(*deadline).await } else { std::future::pending::<()>().await } } => {
+                if let Some((id, _)) = configuring.take() {
+                    record(out, Record::ConfigurationRejected { id: id.as_str().unwrap_or_default().to_string(), detail: "Setting change was not confirmed within 30 seconds".into() }).await?;
+                }
             }
         }
     }

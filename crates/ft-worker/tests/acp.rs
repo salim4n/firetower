@@ -11,6 +11,10 @@ struct Peer {
 }
 impl Peer {
     async fn start(scenario: &str, saved: bool) -> Self {
+        Self::start_for(scenario, saved, ft_core::Agent::KimiCode).await
+    }
+
+    async fn start_for(scenario: &str, saved: bool, kind: ft_core::Agent) -> Self {
         let workspace = tempfile::tempdir().unwrap();
         if saved {
             std::fs::create_dir(workspace.path().join(".firetower")).unwrap();
@@ -56,7 +60,8 @@ impl Peer {
         let (writer, output) = tokio::io::duplex(65536);
         let path = workspace.path().to_owned();
         let task = tokio::spawn(async move {
-            ft_worker::acp::serve(command, "test", &path, BufReader::new(reader), writer).await
+            ft_worker::acp::serve_for(command, kind, "test", &path, BufReader::new(reader), writer)
+                .await
         });
         Self {
             input,
@@ -108,6 +113,67 @@ impl Peer {
             .unwrap()
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn grok_requires_connected_subscription_and_authenticates_before_session() {
+    let mut missing = Peer::start_for("grok-unauth", false, ft_core::Agent::GrokBuild).await;
+    loop {
+        match missing.record().await {
+            Record::Sent { message } => assert_ne!(message["method"], "session/new"),
+            Record::Failed { detail } => {
+                assert!(detail.contains("connected subscription"));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(missing.task.await.unwrap().is_err());
+
+    let mut connected = Peer::start_for("grok-auth", false, ft_core::Agent::GrokBuild).await;
+    let records = connected.ready().await;
+    let methods: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Sent { message } => message["method"].as_str(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(methods, ["initialize", "authenticate", "session/new"]);
+    connected.finish().await;
+}
+
+#[tokio::test]
+async fn grok_missing_session_is_confirmed_with_list_before_carrying() {
+    let mut peer = Peer::start_for("grok-missing", true, ft_core::Agent::GrokBuild).await;
+    let records = peer.ready().await;
+    let methods: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Sent { message } => message["method"].as_str(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "authenticate",
+            "session/load",
+            "session/list",
+            "session/new"
+        ]
+    );
+    peer.send(Input::Prompt {
+        text: "new request".into(),
+    })
+    .await;
+    let prompt = peer.sent("session/prompt").await;
+    assert!(prompt["params"]["prompt"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("blue door"));
+    peer.finish().await;
 }
 
 #[tokio::test]

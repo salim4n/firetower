@@ -144,11 +144,18 @@ pub(super) async fn create_account(
 ) -> ApiResult<Json<Account>> {
     let owner = owner(&p)?;
     let label = name(&req.name)?;
-    if !matches!(req.kind, Agent::ClaudeCode | Agent::Codex | Agent::KimiCode)
-        || req.mode == AgentMode::NotNeeded
+    if !matches!(
+        req.kind,
+        Agent::ClaudeCode | Agent::Codex | Agent::KimiCode | Agent::GrokBuild
+    ) || req.mode == AgentMode::NotNeeded
     {
         return Err(invalid(
-            "choose Claude Code, Codex or Kimi Code and an authentication method",
+            "choose Claude Code, Codex, Kimi Code or Grok Build and an authentication method",
+        ));
+    }
+    if req.kind == Agent::GrokBuild && req.mode != AgentMode::Subscription {
+        return Err(invalid(
+            "Grok Build currently connects through subscription device sign-in",
         ));
     }
     let secret = req
@@ -198,12 +205,33 @@ pub(super) async fn connect(
 ) -> Result<(), ApiError> {
     let a = find(db, owner, id).await?;
     let parsed: serde_json::Value = serde_json::from_str(secret).unwrap_or_default();
-    let identity = parsed
-        .pointer("/tokens/account_id")
-        .and_then(|v| v.as_str());
+    let grok = if a.kind == "GrokBuild" {
+        parsed
+            .as_object()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|(issuer, _)| issuer.starts_with("https://auth.x.ai::"))
+            })
+            .map(|(_, account)| account)
+    } else {
+        None
+    };
+    let stable_id = grok
+        .and_then(|v| v.get("principal_id"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            parsed
+                .pointer("/tokens/account_id")
+                .and_then(|v| v.as_str())
+        });
+    let identity = grok
+        .and_then(|v| v.get("email"))
+        .and_then(|v| v.as_str())
+        .or(stable_id);
     let fingerprint = format!(
         "{:x}",
-        Sha256::digest(identity.unwrap_or(secret).as_bytes())
+        Sha256::digest(stable_id.unwrap_or(secret).as_bytes())
     );
     // Legacy credentials keep their encrypted vault names during migration.
     // Compare them only when a person connects another account, never on list.
@@ -219,10 +247,23 @@ pub(super) async fn connect(
         {
             let previous_json: serde_json::Value =
                 serde_json::from_str(&previous).unwrap_or_default();
-            let previous_identity = previous_json
-                .pointer("/tokens/account_id")
-                .and_then(|v| v.as_str());
-            if previous.as_str() == secret || (identity.is_some() && identity == previous_identity)
+            let previous_identity = if a.kind == "GrokBuild" {
+                previous_json
+                    .as_object()
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .find(|(issuer, _)| issuer.starts_with("https://auth.x.ai::"))
+                    })
+                    .and_then(|(_, account)| account.get("principal_id"))
+                    .and_then(|v| v.as_str())
+            } else {
+                previous_json
+                    .pointer("/tokens/account_id")
+                    .and_then(|v| v.as_str())
+            };
+            if previous.as_str() == secret
+                || (stable_id.is_some() && stable_id == previous_identity)
             {
                 return Err(invalid(format!(
                     "this account is already connected as {label}"
@@ -276,7 +317,8 @@ pub(super) async fn update_account(
     let owner = owner(&p)?;
     let a = find(&state.db, owner, &id).await?;
     if let Some(secret) = req.secret.as_deref() {
-        if a.kind == "Codex" && a.mode == "Subscription" {
+        if matches!(a.kind.as_str(), "Codex" | "KimiCode" | "GrokBuild") && a.mode == "Subscription"
+        {
             return Err(invalid("use device sign-in to reconnect this account"));
         }
         if secret.trim().is_empty() {

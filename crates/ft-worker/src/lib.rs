@@ -67,6 +67,7 @@ pub mod docker;
 pub mod entry;
 pub mod first_run;
 pub mod git;
+pub mod grok;
 pub mod history;
 pub mod hooks;
 pub mod kimi;
@@ -533,6 +534,7 @@ impl Worker {
                 enum Signing {
                     Codex(codex::Waiting),
                     Kimi(kimi::Waiting),
+                    Grok(grok::Waiting),
                 }
 
                 let home = self.root.join("agent-login").join(&req);
@@ -545,6 +547,9 @@ impl Worker {
                             .await
                             .map(|(p, w)| (p.user_code, p.verification_url, Signing::Kimi(w)))
                     }
+                    ft_core::Agent::GrokBuild => grok::start(&self.root, &home)
+                        .await
+                        .map(|(p, w)| (p.user_code, p.verification_url, Signing::Grok(w))),
                     other => Err(anyhow::anyhow!(
                         "{} does not sign in with a code",
                         other.label()
@@ -574,6 +579,7 @@ impl Worker {
                             let finished = match waiting {
                                 Signing::Codex(w) => w.finish().await,
                                 Signing::Kimi(w) => w.finish().await,
+                                Signing::Grok(w) => w.finish().await,
                             };
                             let result = finished
                                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -3145,6 +3151,10 @@ async fn prepare_agent_home(
     let has_key = agent
         .api_key_var()
         .is_some_and(|key| env.iter().any(|(k, _)| k == key));
+    anyhow::ensure!(
+        agent != ft_core::Agent::GrokBuild || !files.is_empty(),
+        "Grok Build needs a Firetower-connected subscription account"
+    );
     if files.is_empty() && !has_key {
         return Ok(());
     }

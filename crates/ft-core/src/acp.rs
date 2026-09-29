@@ -7,7 +7,7 @@ use crate::controls::{Choice, Control, ControlKind};
 use crate::turn::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "acp")]
@@ -78,6 +78,7 @@ pub struct AcpNormaliser {
     requests: BTreeSet<String>,
     configuration_requests: BTreeSet<String>,
     configuration: Vec<(String, Control)>,
+    subagents: BTreeMap<String, ItemId>,
 }
 
 impl AcpNormaliser {
@@ -179,6 +180,7 @@ impl AcpNormaliser {
         match record {
             Record::ConfigurationRejected { .. } => {}
             Record::Started { epoch } => {
+                self.close_subagents(ItemStatus::Failed, &mut events);
                 self.finish(
                     TurnStatus::Interrupted,
                     Some("Agent connection restarted; previous work was not replayed.".into()),
@@ -191,6 +193,7 @@ impl AcpNormaliser {
             }
             Record::Ready { session } => self.session = Some(session),
             Record::Failed { detail } => {
+                self.close_subagents(ItemStatus::Failed, &mut events);
                 if self.active.is_none() {
                     self.active =
                         Some((Value::Null, TurnId::new(format!("{}:startup", self.epoch))));
@@ -263,6 +266,12 @@ impl AcpNormaliser {
                 // The journal already has this history. A load replays it for
                 // the agent/client handshake, not as new user-visible work.
                 if replay {
+                    return events;
+                }
+                if message["method"] == "_x.ai/session_notification"
+                    && self.session.as_deref() == message["params"]["sessionId"].as_str()
+                {
+                    self.subagent_update(&message["params"]["update"], &mut events);
                     return events;
                 }
                 if message["method"] == "session/request_permission" {
@@ -363,12 +372,18 @@ impl AcpNormaliser {
                 };
                 let item = ItemId::new(format!("{turn}:tool:{id}"));
                 if self.items.insert(item.clone()) {
-                    let kind = match update["kind"].as_str() {
-                        Some("read") => ItemKind::FileRead,
-                        Some("edit" | "delete" | "move") => ItemKind::FileChange,
-                        Some("execute") => ItemKind::CommandExecution,
-                        Some("search" | "fetch") => ItemKind::WebSearch,
-                        _ => ItemKind::Unknown,
+                    let kind = if update["title"] == "spawn_subagent"
+                        || update["_meta"]["x.ai/tool"]["name"] == "spawn_subagent"
+                    {
+                        ItemKind::SubagentCall
+                    } else {
+                        match update["kind"].as_str() {
+                            Some("read") => ItemKind::FileRead,
+                            Some("edit" | "delete" | "move") => ItemKind::FileChange,
+                            Some("execute") => ItemKind::CommandExecution,
+                            Some("search" | "fetch") => ItemKind::WebSearch,
+                            _ => ItemKind::Unknown,
+                        }
                     };
                     events.push(TurnEvent::ItemStarted {
                         item: item.clone(),
@@ -427,6 +442,90 @@ impl AcpNormaliser {
                 source: RawSource::Acp,
                 payload: update.clone(),
             }),
+        }
+    }
+
+    /// Grok Build's extension carries child identity and lifecycle on the
+    /// parent connection. It does not reliably name the parent tool call at
+    /// spawn time, so use a stable synthetic item rather than guessing which
+    /// of several concurrent spawn calls owns the child.
+    fn subagent_update(&mut self, update: &Value, events: &mut Vec<TurnEvent>) {
+        let Some(id) = update["subagent_id"].as_str() else {
+            return;
+        };
+        let key = format!("{}:subagent:{id}", self.epoch);
+        let task = TaskId::new(key.clone());
+        match update["sessionUpdate"].as_str() {
+            Some("subagent_spawned") => {
+                if self.subagents.contains_key(id) {
+                    return;
+                }
+                let item = ItemId::new(key);
+                self.subagents.insert(id.to_string(), item.clone());
+                let description = update["description"].as_str().unwrap_or("Delegated work");
+                events.push(TurnEvent::ItemStarted {
+                    item: item.clone(),
+                    kind: ItemKind::SubagentCall,
+                    title: Some(description.to_string()),
+                    task: None,
+                });
+                events.push(TurnEvent::TaskStarted {
+                    task,
+                    item,
+                    description: description.to_string(),
+                    agent: update["subagent_type"].as_str().map(str::to_owned),
+                });
+            }
+            Some("subagent_progress") if self.subagents.contains_key(id) => {
+                let turns = update["turn_count"].as_u64().unwrap_or(0);
+                let calls = update["tool_call_count"].as_u64().unwrap_or(0);
+                let names: Vec<_> = update["tools_used"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().or_else(|| v["name"].as_str()))
+                    .take(8)
+                    .collect();
+                let detail = if names.is_empty() {
+                    format!("{turns} turns · {calls} tool calls")
+                } else {
+                    format!("{turns} turns · {calls} tool calls · {}", names.join(", "))
+                };
+                events.push(TurnEvent::TaskProgress { task, detail });
+            }
+            Some("subagent_finished") => {
+                let Some(item) = self.subagents.remove(id) else {
+                    return;
+                };
+                let status = if update["status"] == "completed" {
+                    ItemStatus::Completed
+                } else {
+                    ItemStatus::Failed
+                };
+                events.push(TurnEvent::TaskCompleted {
+                    task,
+                    status,
+                    summary: update["output"].as_str().map(str::to_owned),
+                });
+                events.push(TurnEvent::ItemCompleted { item, status });
+            }
+            _ => events.push(TurnEvent::Raw {
+                source: RawSource::Acp,
+                payload: update.clone(),
+            }),
+        }
+    }
+
+    fn close_subagents(&mut self, status: ItemStatus, events: &mut Vec<TurnEvent>) {
+        for (id, item) in std::mem::take(&mut self.subagents) {
+            events.push(TurnEvent::TaskCompleted {
+                task: TaskId::new(format!("{}:subagent:{id}", self.epoch)),
+                status,
+                summary: Some(
+                    "Agent connection ended before this subagent reported completion".into(),
+                ),
+            });
+            events.push(TurnEvent::ItemCompleted { item, status });
         }
     }
 

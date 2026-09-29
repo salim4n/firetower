@@ -370,6 +370,13 @@ pub(super) async fn configure_agent(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
+    if kind == Agent::GrokBuild && (req.mode != AgentMode::Subscription || secret.is_some()) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidRequest,
+            "Connect Grok Build through subscription device sign-in",
+        ));
+    }
+
     let owner = owner(&principal)?;
 
     // No secret and the same mode as before is a change to `enabled` alone:

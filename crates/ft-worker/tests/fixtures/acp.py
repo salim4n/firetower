@@ -10,20 +10,31 @@ for line in sys.stdin:
     m = json.loads(line)
     method = m.get("method")
     if method == "initialize":
-        emit({"id": m["id"], "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": scenario != "no-load"}}})
+        grok = scenario.startswith("grok-")
+        capabilities = {"loadSession": scenario != "no-load"}
+        if grok:
+            capabilities["sessionCapabilities"] = {"list": {}}
+        emit({"id": m["id"], "result": {"protocolVersion": 1, "agentCapabilities": capabilities,
+             "authMethods": [{"id": "grok.com"}] if scenario == "grok-unauth" else ([{"id": "cached_token"}] if grok else [])}})
+    elif method == "authenticate":
+        emit({"id": m["id"], "result": {}})
     elif method == "session/new":
         if scenario == "auth":
             emit({"id": m["id"], "error": {"code": -32000, "message": "Authentication required"}})
         else:
             emit({"id": m["id"], "result": {"sessionId": "fixture-session"}})
     elif method == "session/load":
-        if scenario == "missing":
+        if scenario == "grok-missing":
+            emit({"id":m["id"],"error":{"code":-32603,"message":"Path not found.","data":{"code":"FS_NOT_FOUND","detail":"No such file or directory (os error 2)"}}})
+        elif scenario == "missing":
             emit({"id":m["id"], "error":{"code":-32602,"message":"Invalid params: Unknown sessionId: old-session","data":{"sessionId":"old-session"}}})
         elif scenario == "load-auth":
             emit({"id":m["id"], "error":{"code":-32000,"message":"Authentication required"}})
         else:
             emit({"method":"session/update","params":{"sessionId":m["params"]["sessionId"],"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old replay"}}}})
             emit({"id":m["id"], "result":{}})
+    elif method == "session/list":
+        emit({"id":m["id"],"result":{"sessions":[]}})
     elif method == "session/prompt":
         active = m["id"]
         if scenario == "malformed":

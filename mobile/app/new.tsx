@@ -137,6 +137,7 @@ export default function NewWorkspace() {
 
   const host = hosts.find((h) => h.id === hostId);
   const account = accounts.find((a) => a.id === accountId);
+  const selectedAgent = agents.find((a) => a.kind === agent);
   const chosenRepos = repos.filter((r) => picked.includes(r.id));
 
   /* Only accounts for the agent that will run. Offering a Codex login to a
@@ -156,7 +157,10 @@ export default function NewWorkspace() {
     [agent, accounts],
   );
 
-  const ready = name.trim().length > 0 && picked.length > 0 && !!hostId && !!agent && !create.isPending;
+  const ready = name.trim().length > 0 && picked.length > 0 && !!hostId && !!agent &&
+    !!selectedAgent?.supported && !!selectedAgent.hosts.find((h) => h.hostId === hostId)?.installed &&
+    (!selectedAgent.needsCredential || (accountId ? !!account?.credentialSet : selectedAgent.credentialSet)) &&
+    !create.isPending;
 
   return (
     <View className="flex-1 bg-ground" style={{ paddingTop: insets.top }}>
@@ -386,8 +390,10 @@ export default function NewWorkspace() {
         choices={agents.map((a) => ({
           id: a.kind,
           label: a.label,
-          detail: a.hosts?.[0]?.version ?? undefined,
-          blocked: a.supported ? undefined : "Not supported on this server",
+          detail: a.hosts.find((h) => h.hostId === hostId)?.version ?? undefined,
+          blocked: !a.supported ? "Not supported on this server" :
+            !hostId ? "Choose a machine first" :
+            !a.hosts.find((h) => h.hostId === hostId)?.installed ? "Not installed on this machine" : undefined,
         }))}
         onPick={(id) => {
           setAgent(id);

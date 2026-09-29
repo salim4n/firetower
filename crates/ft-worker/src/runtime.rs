@@ -154,6 +154,7 @@ pub async fn install(state: &Path, kind: Agent, version: Option<&str>) -> Result
         Agent::ClaudeCode => fetch_claude(&bin, &platform, version).await,
         Agent::Codex => fetch_codex(&bin, &platform, version).await,
         Agent::KimiCode => fetch_kimi(&bin, &platform, version).await,
+        Agent::GrokBuild => fetch_grok(&bin, &platform, version).await,
         Agent::Shell => unreachable!("refused above"),
     };
     if let Err(e) = fetched {
@@ -200,6 +201,7 @@ fn directory(kind: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Shell => "shell",
         Agent::KimiCode => "kimi",
+        Agent::GrokBuild => "grok",
     }
 }
 
@@ -291,6 +293,58 @@ impl Platform {
             (Os::Linux, Arch::X86_64) => "x86_64-unknown-linux-musl",
         }
     }
+}
+
+// Publisher's direct binary URL, as used by https://x.ai/cli/install.sh.
+// This is the release actually exercised with a subscription and ACP on
+// macOS arm64. Other targets fail closed until their artifacts are verified.
+const GROK_VERSION: &str = "1.0.44";
+const GROK_MACOS_ARM64_SHA256: &str =
+    "b637a934c22ee480cc133a783712f5abd845ae87f7b0aa646c220af3d67f7c28";
+
+/// Grok sessions and sign-in must use Firetower's verified copy. A global
+/// `grok` earlier on PATH could otherwise run a different version or account.
+pub async fn grok_binary(state: &Path) -> Result<PathBuf> {
+    let installed = newest(state, Agent::GrokBuild)
+        .await
+        .context("Grok Build is not installed on this worker; install it from Agents")?;
+    anyhow::ensure!(
+        installed.version == GROK_VERSION,
+        "Grok Build {} is installed but {GROK_VERSION} is required",
+        installed.version
+    );
+    let binary = installed.bin.join("grok");
+    anyhow::ensure!(
+        binary.is_file(),
+        "the installed Grok Build binary is missing"
+    );
+    Ok(binary)
+}
+
+async fn fetch_grok(bin: &Path, platform: &Platform, version: Option<&str>) -> Result<()> {
+    if version.is_some_and(|requested| requested != GROK_VERSION) {
+        bail!("Grok Build is pinned to verified version {GROK_VERSION}");
+    }
+    if platform.os != Os::Darwin || platform.arch != Arch::Aarch64 {
+        bail!("Grok Build {GROK_VERSION} has not been verified for this worker platform");
+    }
+    let target = bin.join("grok");
+    download(
+        &format!("https://x.ai/cli/grok-{GROK_VERSION}-macos-aarch64"),
+        &target,
+    )
+    .await
+    .context("downloading the publisher's Grok Build binary")?;
+    anyhow::ensure!(
+        sha256_of(&target).await? == GROK_MACOS_ARM64_SHA256,
+        "Grok Build {GROK_VERSION} did not match the tested binary"
+    );
+    executable(&target).await?;
+    anyhow::ensure!(
+        version_of(&target).await.as_deref() == Some(GROK_VERSION),
+        "Grok Build did not report the pinned version"
+    );
+    Ok(())
 }
 
 // ── Claude Code ──────────────────────────────────────────────────────

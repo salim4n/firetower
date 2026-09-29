@@ -123,8 +123,31 @@ async fn check_with_path(root: &Path, agent: Option<Agent>, path: &OsStr) -> Rea
         ),
     });
     if let Some(agent) = agent {
-        checks.push(tool(agent.label(), agent.command(), &["--version"], true,
-            "Install this agent on the machine, or let Firetower fetch it: the readiness panel offers Install, and `firetower-worker agents add` does the same by hand.", path).await);
+        if agent == Agent::GrokBuild {
+            match crate::runtime::grok_binary(root).await {
+                Ok(binary) => checks.push(
+                    tool(
+                        agent.label(),
+                        &binary.to_string_lossy(),
+                        &["--version"],
+                        true,
+                        "Install the verified Grok Build binary from the Agents screen.",
+                        path,
+                    )
+                    .await,
+                ),
+                Err(e) => checks.push(Requirement {
+                    name: agent.label().into(),
+                    available: false,
+                    required: true,
+                    detail: e.to_string(),
+                    remedy: Some("Install Grok Build from the Agents screen on this host.".into()),
+                }),
+            }
+        } else {
+            checks.push(tool(agent.label(), agent.command(), &["--version"], true,
+                "Install this agent on the machine, or let Firetower fetch it: the readiness panel offers Install, and `firetower-worker agents add` does the same by hand.", path).await);
+        }
         // Answering `--version` is the whole of what the check above proves,
         // and for Codex that is not enough to run a session.
         if agent == Agent::Codex {

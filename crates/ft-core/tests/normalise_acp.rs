@@ -250,3 +250,55 @@ fn accepted_model_change_replaces_efforts_without_starting_or_finishing_a_turn()
         "do not advertise stale choices during restart"
     );
 }
+
+#[test]
+fn grok_subagent_lifecycle_keeps_child_identity_and_progress() {
+    use ft_core::turn::{ItemKind, ItemStatus};
+    let mut reader = AcpNormaliser::default();
+    let mut feed = |record| reader.push(&serde_json::to_string(&record).unwrap());
+    feed(Record::Started { epoch: "e".into() });
+    feed(Record::Ready {
+        session: "parent".into(),
+    });
+    feed(Record::Sent {
+        message: json!({"id":4,"method":"session/prompt","params":{"prompt":[]}}),
+    });
+    let spawned = feed(Record::Received {
+        message: json!({"method":"_x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned","subagent_id":"child-1","description":"Check arithmetic","subagent_type":"general"}}}),
+        replay: false,
+    });
+    assert!(spawned.iter().any(|e| matches!(
+        e,
+        TurnEvent::ItemStarted {
+            kind: ItemKind::SubagentCall,
+            ..
+        }
+    )));
+    assert!(spawned.iter().any(|e| matches!(e, TurnEvent::TaskStarted { task, description, .. } if task.as_str() == "e:subagent:child-1" && description == "Check arithmetic")));
+    let progress = feed(Record::Received {
+        message: json!({"method":"_x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_progress","subagent_id":"child-1","turn_count":2,"tool_call_count":1,"tools_used":["read_file"]}}}),
+        replay: false,
+    });
+    assert!(progress.iter().any(
+        |e| matches!(e, TurnEvent::TaskProgress { detail, .. } if detail.contains("read_file"))
+    ));
+    let finished = feed(Record::Received {
+        message: json!({"method":"_x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_finished","subagent_id":"child-1","status":"completed","output":"143"}}}),
+        replay: false,
+    });
+    assert!(finished.iter().any(|e| matches!(e, TurnEvent::TaskCompleted { status: ItemStatus::Completed, summary: Some(summary), .. } if summary == "143")));
+    assert!(finished.iter().any(|e| matches!(
+        e,
+        TurnEvent::ItemCompleted {
+            status: ItemStatus::Completed,
+            ..
+        }
+    )));
+    let repeated = feed(Record::Received {
+        message: json!({"method":"_x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_finished","subagent_id":"child-1","status":"completed"}}}),
+        replay: false,
+    });
+    assert!(!repeated
+        .iter()
+        .any(|e| matches!(e, TurnEvent::TaskCompleted { .. })));
+}
