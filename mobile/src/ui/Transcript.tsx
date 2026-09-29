@@ -16,7 +16,7 @@ import { useState } from "react";
 import { Image, Pressable, Text, View } from "react-native";
 import { ChevronDown, ChevronRight, FileDiff, FileText, Search, Terminal, Users } from "lucide-react-native";
 import type { Item, Task } from "~/api/conversation";
-import { delegated, fold, mainline, type Row } from "~/api/steps";
+import { delegated, fold, mainline, summarise, type Row } from "~/api/steps";
 import { Code, Prose } from "~/ui/Prose";
 import { color } from "~/design/tokens.generated";
 
@@ -84,11 +84,14 @@ function Rail({ children }: { children: React.ReactNode }) {
 
 function Group({ items }: { items: Item[] }) {
   const [open, setOpen] = useState(false);
+  const summary = summarise(items);
   return (
     <Rail>
       <Pressable testID="tool-group" onPress={() => setOpen((o) => !o)} className="flex-row items-center gap-2 py-1.5" hitSlop={6}>
         {open ? <ChevronDown color={color.mute} size={12} /> : <ChevronRight color={color.mute} size={12} />}
-        <Text className="font-sans text-meta text-mute">{items.length} steps</Text>
+        <Text className="font-sans text-meta text-mute">{summary.verb} {summary.text}</Text>
+        {summary.failed > 0 ? <Text className="font-sans text-meta text-brick">{summary.failed} failed</Text> : null}
+        {summary.declined > 0 ? <Text className="font-sans text-meta text-brick">{summary.declined} declined</Text> : null}
       </Pressable>
       {open ? <View className="pb-1">{items.map((i) => <Tool key={i.id} item={i} />)}</View> : null}
     </Rail>

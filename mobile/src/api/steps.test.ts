@@ -135,6 +135,14 @@ describe("summarise", () => {
   test("failures are counted, so the row can be marked without opening", () => {
     expect(summarise([ran("a"), broke("b"), broke("c")]).failed).toBe(2);
   });
+
+  test("a denied approval is reported separately from a tool failure", () => {
+    const declined = item("denied", "CommandExecution", "Declined");
+    expect(summarise([ran("a"), declined, broke("b")])).toMatchObject({
+      failed: 1,
+      declined: 1,
+    });
+  });
 });
 
 /**
