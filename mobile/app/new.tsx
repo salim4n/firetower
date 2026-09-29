@@ -162,7 +162,7 @@ export default function NewWorkspace() {
   );
 
   const ready = name.trim().length > 0 && picked.length > 0 && !!hostId && !!agent &&
-    !!selectedAgent?.supported && !!selectedAgent.hosts.find((h) => h.hostId === hostId)?.installed &&
+    !!selectedAgent?.enabled && !!selectedAgent.supported && !!selectedAgent.hosts.find((h) => h.hostId === hostId)?.installed &&
     (!selectedAgent.needsCredential || (accountId ? !!account && usable(account) : selectedAgent.credentialSet)) &&
     !create.isPending;
 
@@ -395,7 +395,8 @@ export default function NewWorkspace() {
           id: a.kind,
           label: a.label,
           detail: a.hosts.find((h) => h.hostId === hostId)?.version ?? undefined,
-          blocked: !a.supported ? "Not supported on this server" :
+          blocked: !a.enabled ? "Not offered on this server" :
+            !a.supported ? "Not supported on this server" :
             !hostId ? "Choose a machine first" :
             !a.hosts.find((h) => h.hostId === hostId)?.installed ? "Not installed on this machine" : undefined,
         }))}
