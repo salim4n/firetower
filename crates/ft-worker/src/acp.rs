@@ -120,10 +120,12 @@ where
         let mut stdin = child.stdin.take().context("ACP stdin")?;
         let mut stdout = BufReader::new(child.stdout.take().context("ACP stdout")?).lines();
         let result = connection(
-            session,
-            kind,
-            workspace,
-            &epoch,
+            ConnectionContext {
+                session,
+                kind,
+                workspace,
+                epoch: &epoch,
+            },
             &mut stdin,
             &mut stdout,
             input,
@@ -250,11 +252,20 @@ async fn save(path: &Path, value: &Saved) -> Result<()> {
     Ok(())
 }
 
-async fn connection<R, W>(
-    session: &str,
+struct ConnectionContext<'a> {
+    session: &'a str,
     kind: ft_core::Agent,
-    workspace: &Path,
-    epoch: &str,
+    workspace: &'a Path,
+    epoch: &'a str,
+}
+
+async fn connection<R, W>(
+    ConnectionContext {
+        session,
+        kind,
+        workspace,
+        epoch,
+    }: ConnectionContext<'_>,
     stdin: &mut ChildStdin,
     stdout: &mut Lines<BufReader<ChildStdout>>,
     input: R,

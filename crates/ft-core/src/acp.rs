@@ -521,15 +521,16 @@ impl AcpNormaliser {
             events.push(TurnEvent::TaskCompleted {
                 task: TaskId::new(format!("{}:subagent:{id}", self.epoch)),
                 status,
-                summary: Some(
-                    "Agent connection ended before this subagent reported completion".into(),
-                ),
+                summary: Some("Parent turn ended before this subagent reported completion".into()),
             });
             events.push(TurnEvent::ItemCompleted { item, status });
         }
     }
 
     fn finish(&mut self, status: TurnStatus, detail: Option<String>, events: &mut Vec<TurnEvent>) {
+        // A provider may stop a prompt without sending the child's final
+        // extension event. Close its task before the parent turn goes idle.
+        self.close_subagents(ItemStatus::Failed, events);
         for req in std::mem::take(&mut self.requests) {
             events.push(TurnEvent::RequestResolved {
                 req: RequestId::new(req),

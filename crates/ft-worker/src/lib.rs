@@ -558,6 +558,10 @@ impl Worker {
 
                 match started {
                     Err(e) => {
+                        // `start` may have created a private login home before
+                        // the CLI failed to print a code. Leave no stale
+                        // credential or partial configuration on this host.
+                        let _ = tokio::fs::remove_dir_all(&home).await;
                         out.send(ToServer::AgentLoginPending {
                             req,
                             result: Err(format!("{e:#}")),

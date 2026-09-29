@@ -126,4 +126,20 @@ mod tests {
         let pending = read_code(&mut lines).await.unwrap();
         assert_eq!(pending.user_code, "ABCD-EFGH");
     }
+
+    /// Run manually with a Firetower-installed pinned CLI to detect a change
+    /// in the stream or shape of the real device-code response.
+    #[tokio::test]
+    #[ignore = "requires a Firetower-installed Grok Build CLI and xAI network access"]
+    async fn real_cli_prints_a_device_code_on_stderr() {
+        let root = std::env::var(ft_core::WORKER_ROOT_ENV)
+            .expect("set FIRETOWER_WORKER_ROOT to a worker with Grok Build installed");
+        let home = tempfile::tempdir().unwrap();
+        let (pending, waiting) = start(Path::new(&root), home.path()).await.unwrap();
+        assert!(pending
+            .verification_url
+            .starts_with("https://accounts.x.ai/oauth2/device?"));
+        assert!(!pending.user_code.is_empty());
+        waiting.cancel().await.unwrap();
+    }
 }

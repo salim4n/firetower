@@ -302,3 +302,40 @@ fn grok_subagent_lifecycle_keeps_child_identity_and_progress() {
         .iter()
         .any(|e| matches!(e, TurnEvent::TaskCompleted { .. })));
 }
+
+#[test]
+fn cancelled_parent_closes_unfinished_grok_subagent() {
+    use ft_core::turn::ItemStatus;
+    let mut reader = AcpNormaliser::default();
+    let mut feed = |record| reader.push(&serde_json::to_string(&record).unwrap());
+    feed(Record::Started { epoch: "e".into() });
+    feed(Record::Ready {
+        session: "parent".into(),
+    });
+    feed(Record::Sent {
+        message: json!({"id":4,"method":"session/prompt","params":{"prompt":[]}}),
+    });
+    feed(Record::Received {
+        message: json!({"method":"_x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned","subagent_id":"child-1","description":"Check arithmetic"}}}),
+        replay: false,
+    });
+    let ended = feed(Record::Received {
+        message: json!({"id":4,"result":{"stopReason":"cancelled"}}),
+        replay: false,
+    });
+    assert!(ended.iter().any(|event| matches!(
+        event,
+        TurnEvent::TaskCompleted {
+            status: ItemStatus::Failed,
+            ..
+        }
+    )));
+    assert!(ended.iter().any(|event| matches!(
+        event,
+        TurnEvent::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            ..
+        }
+    )));
+    assert!(!reader.working());
+}
