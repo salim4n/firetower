@@ -38,6 +38,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCreateSession } from "~/api/generated/sessions/sessions";
 import type { Agent, Share } from "~/api/generated/model";
 import { useAccounts, useAgents, useHosts, useRepos, why } from "~/data";
+import { usable } from "~/api/accounts";
 import { leaveDraft } from "~/workspace/draft";
 import { takeConnected } from "~/workspace/connected";
 import { Field, Picker, Trigger, type Choice } from "~/ui/Picker";
@@ -152,14 +153,17 @@ export default function NewWorkspace() {
           id: a.id,
           label: a.name,
           detail: a.identity ?? (a.isDefault ? "default" : undefined),
-          blocked: a.credentialSet ? undefined : "No credential set",
+          blocked: !a.enabled ? "Account disabled" :
+            a.state === "pending" ? "Sign-in pending" :
+            a.state !== "connected" ? "Sign-in failed — reconnect from the web or desktop" :
+            !a.credentialSet ? "No credential set" : undefined,
         })),
     [agent, accounts],
   );
 
   const ready = name.trim().length > 0 && picked.length > 0 && !!hostId && !!agent &&
     !!selectedAgent?.supported && !!selectedAgent.hosts.find((h) => h.hostId === hostId)?.installed &&
-    (!selectedAgent.needsCredential || (accountId ? !!account?.credentialSet : selectedAgent.credentialSet)) &&
+    (!selectedAgent.needsCredential || (accountId ? !!account && usable(account) : selectedAgent.credentialSet)) &&
     !create.isPending;
 
   return (

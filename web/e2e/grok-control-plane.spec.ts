@@ -30,6 +30,18 @@ test.describe("Grok Build on a fresh Firetower worker", () => {
     await expect(page.getByRole("button", { name: "Reinstall" })).toBeVisible();
   });
 
+  test("shows host readiness and the missing subscription in the workspace picker", async ({ page }) => {
+    test.skip(!process.env.FIRETOWER_E2E_EXPECT_NO_ACCOUNT, "requires an installed worker with no connected Grok account");
+    await signIn(page);
+    await expect(page.getByText(/grok 1\.0\.44/)).toBeVisible();
+    await page.getByRole("button", { name: "Dashboard" }).click();
+    await page.getByRole("button", { name: "New workspace", exact: true }).click();
+    await page.getByRole("button", { name: /Grok Build/ }).click();
+    await expect(page.getByText(/Ready — runs as/)).toBeVisible();
+    await expect(page.getByText("No Grok Build account connected.")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Start it/ })).toBeDisabled();
+  });
+
   test("connects a subscription through the displayed device flow", async ({ page }) => {
     test.skip(!process.env.FIRETOWER_E2E_APPROVE_DEVICE, "requires the account owner to approve the displayed code");
     const codeFile = process.env.FIRETOWER_E2E_DEVICE_CODE_FILE;
