@@ -296,11 +296,25 @@ impl Platform {
 }
 
 // Publisher's direct binary URL, as used by https://x.ai/cli/install.sh.
-// This is the release actually exercised with a subscription and ACP on
-// macOS arm64. Other targets fail closed until their artifacts are verified.
+// The macOS arm64 release was exercised with a subscription and ACP. The
+// Linux releases below answered --version and ACP initialize in isolated
+// containers. Every other target fails closed until its artifact is verified.
 const GROK_VERSION: &str = "1.0.44";
 const GROK_MACOS_ARM64_SHA256: &str =
     "b637a934c22ee480cc133a783712f5abd845ae87f7b0aa646c220af3d67f7c28";
+const GROK_LINUX_ARM64_SHA256: &str =
+    "a31506d73b4454bbf70c3c2821e41a042fa7838058ba1b271b009a926d175239";
+const GROK_LINUX_X64_SHA256: &str =
+    "f76431873efc5c8a50892d1e1247eaee23f6664bca385fbd55a06a8e7d3caedc";
+
+fn grok_artifact(platform: &Platform) -> Result<(&'static str, &'static str)> {
+    match (platform.os, platform.arch) {
+        (Os::Darwin, Arch::Aarch64) => Ok(("macos-aarch64", GROK_MACOS_ARM64_SHA256)),
+        (Os::Linux, Arch::Aarch64) => Ok(("linux-aarch64", GROK_LINUX_ARM64_SHA256)),
+        (Os::Linux, Arch::X86_64) => Ok(("linux-x86_64", GROK_LINUX_X64_SHA256)),
+        _ => bail!("Grok Build {GROK_VERSION} has not been verified for this worker platform"),
+    }
+}
 
 /// Grok sessions and sign-in must use Firetower's verified copy. A global
 /// `grok` earlier on PATH could otherwise run a different version or account.
@@ -325,18 +339,16 @@ async fn fetch_grok(bin: &Path, platform: &Platform, version: Option<&str>) -> R
     if version.is_some_and(|requested| requested != GROK_VERSION) {
         bail!("Grok Build is pinned to verified version {GROK_VERSION}");
     }
-    if platform.os != Os::Darwin || platform.arch != Arch::Aarch64 {
-        bail!("Grok Build {GROK_VERSION} has not been verified for this worker platform");
-    }
+    let (artifact, checksum) = grok_artifact(platform)?;
     let target = bin.join("grok");
     download(
-        &format!("https://x.ai/cli/grok-{GROK_VERSION}-macos-aarch64"),
+        &format!("https://x.ai/cli/grok-{GROK_VERSION}-{artifact}"),
         &target,
     )
     .await
     .context("downloading the publisher's Grok Build binary")?;
     anyhow::ensure!(
-        sha256_of(&target).await? == GROK_MACOS_ARM64_SHA256,
+        sha256_of(&target).await? == checksum,
         "Grok Build {GROK_VERSION} did not match the tested binary"
     );
     executable(&target).await?;
@@ -857,6 +869,28 @@ mod tests {
         // Kimi ships glibc only, and an install that succeeded here would be
         // a binary that cannot start.
         assert!(alpine.kimi().is_err());
+    }
+
+    #[test]
+    fn grok_uses_only_artifacts_probed_on_the_target_platform() {
+        let platform = |os, arch| Platform {
+            os,
+            arch,
+            musl: false,
+        };
+        assert_eq!(
+            grok_artifact(&platform(Os::Darwin, Arch::Aarch64)).unwrap(),
+            ("macos-aarch64", GROK_MACOS_ARM64_SHA256)
+        );
+        assert_eq!(
+            grok_artifact(&platform(Os::Linux, Arch::Aarch64)).unwrap(),
+            ("linux-aarch64", GROK_LINUX_ARM64_SHA256)
+        );
+        assert_eq!(
+            grok_artifact(&platform(Os::Linux, Arch::X86_64)).unwrap(),
+            ("linux-x86_64", GROK_LINUX_X64_SHA256)
+        );
+        assert!(grok_artifact(&platform(Os::Darwin, Arch::X86_64)).is_err());
     }
 
     #[test]

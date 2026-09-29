@@ -8,9 +8,10 @@ Codex and Kimi Code keep their existing transports.
 
 1. In **Configuration → Agents**, choose **Grok Build** and install it on the
    worker that will run the workspace. Firetower currently pins the publisher's
-   macOS arm64 binary to version **1.0.44** and checks its SHA-256 before making
-   it available. Other worker platforms report that this version has not yet
-   been verified; a global `grok` executable does not count as installed.
+   macOS arm64, Linux arm64 and Linux x86_64 binaries to version **1.0.44** and
+   checks their SHA-256 before making them available. Other worker platforms
+   report that this version has not yet been verified; a global `grok`
+   executable does not count as installed.
 2. Add a **Subscription** Grok Build account in Firetower. Choose a worker for
    the device-code flow, open the xAI URL shown by Firetower and approve the
    short code. The login runs in a temporary `GROK_HOME` on that worker.
@@ -57,8 +58,10 @@ agent confirms it. A nonresponsive option request is reported after 30 seconds.
   not transferred to Firetower automatically.
 - **Prompt fails after login:** confirm the account is entitled to use Grok
   Build. Firetower cannot turn an API key into a subscription.
-- **Unsupported platform:** only macOS arm64 has a verified publisher binary
-  and an authenticated ACP probe for version 1.0.44 so far.
+- **Unsupported platform:** macOS arm64 and Linux arm64/x86_64 have verified
+  publisher binaries. The Linux binaries answered `--version` and ACP
+  `initialize` in isolated containers; only macOS arm64 has an authenticated
+  ACP probe so far. Other platforms fail closed.
 
 The feasibility probe on macOS arm64 completed device-code login, copied only
 `auth.json` into a fresh empty home, authenticated ACP, opened a session and
