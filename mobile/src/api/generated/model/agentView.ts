@@ -25,11 +25,21 @@ export interface AgentView {
   hosts: AgentOnHost[];
   kind: Agent;
   label: string;
+  /**
+     * The newest version its publisher is serving, when the control plane has
+     * managed to ask.
+     *
+     * One per kind rather than per host: what is published does not depend on
+     * which machine is behind it. `None` means nobody has asked yet, or the
+     * publisher could not be reached — neither of which is "up to date".
+     * @nullable
+     */
+  latestVersion?: string | null;
   mode?: null | AgentMode;
   /** True when nothing needs configuring, which is only the plain shell. */
   needsCredential: boolean;
   /**
-     * Whether this one signs a machine in with a code instead.
+     * Whether this one uses a worker-mediated browser sign-in, with or without a short code.
      *
      * Separate from `supported`: a credential is worth having before there is
      * a driver to spend it, and it is the half that needs a person.

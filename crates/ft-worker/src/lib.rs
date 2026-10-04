@@ -62,6 +62,7 @@ pub mod attachments;
 pub mod capacity;
 pub mod cgroup;
 pub mod codex;
+pub mod cursor;
 pub mod describe;
 pub mod docker;
 pub mod entry;
@@ -327,7 +328,10 @@ impl Worker {
                     Some(frame) = pending.recv() => frame,
                     else => break,
                 };
-                outbound.write(&frame).await?;
+                outbound
+                    .write(&frame)
+                    .await
+                    .context("writing control-plane frame")?;
             }
             Ok::<(), anyhow::Error>(())
         };
@@ -421,7 +425,7 @@ impl Worker {
                                     .await;
                                 continue;
                             }
-                            Err(e) => return Err(e.into()),
+                            Err(e) => return Err(anyhow::Error::from(e).context("reading control-plane frame")),
                         };
 
                         // Anything that takes real time runs on its own task.
@@ -533,6 +537,7 @@ impl Worker {
                 enum Signing {
                     Codex(codex::Waiting),
                     Kimi(kimi::Waiting),
+                    Cursor(cursor::Waiting),
                 }
 
                 let home = self.root.join("agent-login").join(&req);
@@ -545,6 +550,9 @@ impl Worker {
                             .await
                             .map(|(p, w)| (p.user_code, p.verification_url, Signing::Kimi(w)))
                     }
+                    ft_core::Agent::CursorAgent => cursor::start(&self.root, &home)
+                        .await
+                        .map(|(p, w)| (p.user_code, p.verification_url, Signing::Cursor(w))),
                     other => Err(anyhow::anyhow!(
                         "{} does not sign in with a code",
                         other.label()
@@ -574,6 +582,7 @@ impl Worker {
                             let finished = match waiting {
                                 Signing::Codex(w) => w.finish().await,
                                 Signing::Kimi(w) => w.finish().await,
+                                Signing::Cursor(w) => w.finish().await,
                             };
                             let result = finished
                                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -907,7 +916,8 @@ impl Worker {
                 message,
             } => {
                 if let Err(e) =
-                    structured::tell(&session_id, &agentd::ToAgent::Send { message }).await
+                    structured::tell_when_listening(&session_id, &agentd::ToAgent::Send { message })
+                        .await
                 {
                     tracing::warn!(session = %session_id, "sending a turn: {e:#}");
                     out.send(ToServer::Error {
@@ -1680,6 +1690,23 @@ You are in the directory that holds them, not inside one of them.              P
                     Ok(structured::Ended::WatcherStopped) => {
                         let _ = out.send(ToServer::AgentUnwatched { session_id: id }).await;
                     }
+                    Ok(structured::Ended::SocketClosed) => {
+                        // EOF is ambiguous: a watcher can lose its socket while
+                        // the agent keeps writing. Only an explicit negative
+                        // tmux probe proves that the supervised agent is gone.
+                        match tmux::Tmux::for_session(id.as_str()).checked_exists().await {
+                            Ok(false) => {
+                                let _ = out.send(ToServer::AgentClosed { session_id: id }).await;
+                            }
+                            Ok(true) => {
+                                let _ = out.send(ToServer::AgentUnwatched { session_id: id }).await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(session = %id, "agent watcher ended but tmux liveness is unknown: {error:#}");
+                                let _ = out.send(ToServer::AgentUnwatched { session_id: id }).await;
+                            }
+                        }
+                    }
                     Err(e) => {
                         // Ordinary rather than exceptional: a session running
                         // in a terminal has no agent to watch, and the control
@@ -1757,7 +1784,11 @@ You are in the directory that holds them, not inside one of them.              P
             .await
             .unwrap_or_default();
         let after_line = previous_log.lines().count();
-        let mut opening = agent.opening(prompt, &path.to_string_lossy());
+        let mut opening = agent.opening(
+            prompt,
+            &path.to_string_lossy(),
+            &ft_core::controls::Preferred::from_env(),
+        );
         if agent == ft_core::Agent::Codex {
             let mut reader = ft_core::codex::CodexNormaliser::default();
             for line in previous_log.lines() {
@@ -1898,6 +1929,37 @@ You are in the directory that holds them, not inside one of them.              P
         self.store
             .record_workspace(&id, path.to_str().unwrap_or_default(), tmux.name())
             .await?;
+
+        // And its own checkout rows, copied from the session that made the
+        // place.
+        //
+        // The facts above are the workspace's, repeated because this store
+        // keeps a row per session. These are the workspace's too, and were the
+        // one kind left out — `record_checkout` is only ever called while
+        // *cutting* a workspace, so every agent added to one afterwards had
+        // none.
+        //
+        // What that cost: `summarize` reads them to know where each repository
+        // sits, and with none it falls back to "the workspace is the checkout"
+        // and runs git at the root. A workspace whose repository is in a named
+        // subdirectory — which is all of them with a slug — then answered
+        // `fatal: not a git repository`, and the screen reported the machine as
+        // unreachable while that same machine was streaming this log.
+        if let Some(first) = &spec.workspace_session {
+            for (position, c) in self.store.checkouts_of(first).await?.iter().enumerate() {
+                self.store
+                    .record_checkout(
+                        &id,
+                        position as i64,
+                        &c.slug,
+                        &c.remote,
+                        &c.base,
+                        &c.branch,
+                        &c.path,
+                    )
+                    .await?;
+            }
+        }
 
         // A tmux session already under this name is one of two quite different
         // things, and refusing both was the bug.
@@ -2459,8 +2521,18 @@ You are in the directory that holds them, not inside one of them.              P
                 })?)
             }
 
-            ft_proto::Action::Diff { checkout, since } => {
+            ft_proto::Action::Diff {
+                checkout,
+                since,
+                names_only,
+            } => {
                 let (dest, base) = self.checkout_diff_refs(session_id, &checkout).await?;
+                if names_only {
+                    // JSON, because there is no unified diff to send and the
+                    // caller would have nothing to split.
+                    let files = self.git.changed_since(&dest, &base, since).await?;
+                    return Ok(serde_json::to_string(&files)?);
+                }
                 self.git.diff_since(&dest, &base, since).await
             }
 
@@ -2516,13 +2588,37 @@ You are in the directory that holds them, not inside one of them.              P
             let Some((branch, base)) = self.store.refs_of(session_id).await? else {
                 return Ok(Vec::new());
             };
-            let summary = self.git.summary(&workspace, &branch, &base).await?;
-            return Ok(vec![ft_core::CheckoutSummary {
-                path: String::new(),
-                slug: self.store.repo_of(session_id).await?.unwrap_or_default(),
-                summary,
-                trouble: None,
-            }]);
+            let slug = self.store.repo_of(session_id).await?.unwrap_or_default();
+            // Reported, not fatal — the same choice the per-checkout loop below
+            // makes, and for the same reason. A `?` here failed the whole
+            // request for one unreadable worktree, the control plane called
+            // that `HostUnreachable`, and the screen said the machine was gone.
+            // One row carrying git's own sentence says what is true instead.
+            return Ok(vec![
+                match self.git.summary(&workspace, &branch, &base).await {
+                    Ok(summary) => ft_core::CheckoutSummary {
+                        path: String::new(),
+                        slug,
+                        summary,
+                        trouble: None,
+                    },
+                    Err(e) => {
+                        tracing::warn!(session = %session_id, "summarising the workspace: {e:#}");
+                        ft_core::CheckoutSummary {
+                            path: String::new(),
+                            slug,
+                            summary: ft_core::WorkSummary {
+                                branch,
+                                uncommitted: 0,
+                                ahead: 0,
+                                pushed: false,
+                                commits: None,
+                            },
+                            trouble: Some(format!("{e:#}")),
+                        }
+                    }
+                },
+            ]);
         }
 
         let mut out = Vec::new();
@@ -3183,8 +3279,26 @@ async fn prepare_agent_home(
     } else {
         write_agent_home(&home, files).await?;
     }
+    if agent == ft_core::Agent::CursorAgent {
+        cursor::prepare_home(&home).await?;
+    }
     env.retain(|(k, _)| k != variable);
     env.push((variable.to_string(), home.display().to_string()));
+    if agent == ft_core::Agent::CursorAgent {
+        env.extend([
+            ("AGENT_CLI_CREDENTIAL_STORE".into(), "file".into()),
+            ("NO_OPEN_BROWSER".into(), "1".into()),
+            (
+                "CURSOR_CONFIG_DIR".into(),
+                home.join("config").display().to_string(),
+            ),
+            (
+                "CURSOR_DATA_DIR".into(),
+                home.join("data").display().to_string(),
+            ),
+            ("XDG_CONFIG_HOME".into(), home.display().to_string()),
+        ]);
+    }
     Ok(())
 }
 
@@ -3286,10 +3400,80 @@ mod watcher_tests {
         worker.watching.lock().await.insert(id.to_string(), over);
 
         worker.watch_agent(&id, 0, &out).await;
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), heard.recv())
+            .await
+            .expect("a watcher should report that its initial connection failed")
+            .expect("the worker should send an event");
         assert!(
-            started(&mut heard).await,
-            "a dead entry stopped a real watcher from starting"
+            matches!(event, ToServer::AgentUnwatched { session_id } if session_id == id),
+            "an initial socket failure must remain an unwatch, not an agent close"
         );
+    }
+
+    /// A socket that disappears after Watch was accepted is ambiguous on its
+    /// own. A real matching tmux session keeps the conversation open; a tmux
+    /// session killed under an established socket proves the agent is gone.
+    #[tokio::test]
+    async fn abrupt_established_socket_eof_closes_only_when_tmux_is_absent() {
+        async fn disconnect(id: SessionId, kill_tmux: bool) -> ToServer {
+            use tokio::io::AsyncBufReadExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let tmux = tmux::Tmux::for_session(id.as_str());
+            tmux.start(dir.path(), "sleep 30", &[]).await.unwrap();
+
+            let socket = agentd::socket_path(id.as_str());
+            tokio::fs::create_dir_all(socket.parent().unwrap())
+                .await
+                .unwrap();
+            let _ = tokio::fs::remove_file(&socket).await;
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+            let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = tokio::io::BufReader::new(stream);
+                let mut frame = String::new();
+                reader.read_line(&mut frame).await.unwrap();
+                let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                assert_eq!(frame["frame"], "Watch");
+                accepted_tx.send(()).unwrap();
+                let _ = close_rx.await;
+                drop(reader);
+            });
+
+            let worker = Worker::open(dir.path()).await.unwrap();
+            let (tx, mut heard) = mpsc::channel(8);
+            let out = Out::merged(tx);
+            worker.watch_agent(&id, 0, &out).await;
+            accepted_rx.await.unwrap();
+
+            if kill_tmux {
+                tmux.kill().await.unwrap();
+            }
+            close_tx.send(()).unwrap();
+
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), heard.recv()).await;
+            let _ = server.await;
+            let _ = tmux.kill().await;
+            let _ = tokio::fs::remove_file(&socket).await;
+
+            event
+                .expect("the watcher should report the established socket EOF")
+                .expect("the worker should send an event")
+        }
+
+        let exited = SessionId::new();
+        assert!(matches!(
+            disconnect(exited.clone(), true).await,
+            ToServer::AgentClosed { session_id } if session_id == exited
+        ));
+
+        let still_running = SessionId::new();
+        assert!(matches!(
+            disconnect(still_running.clone(), false).await,
+            ToServer::AgentUnwatched { session_id } if session_id == still_running
+        ));
     }
 }
 
@@ -4026,6 +4210,145 @@ mod tests {
 
         cleanup(&id).await;
         assert_eq!(standing(&tmux, &id).await, Standing::Fresh);
+    }
+
+    /// A second agent in a workspace inherits where its repositories are.
+    ///
+    /// `record_checkout` only ever runs while a workspace is being *cut*, so
+    /// every agent added to one afterwards had no checkout rows of its own.
+    /// `summarize` reads those rows to know which directory each repository is
+    /// in; with none it falls back to "the workspace is the checkout" and runs
+    /// git at the workspace root. For a workspace whose repository sits in a
+    /// named subdirectory — which is every workspace with a slug — that is the
+    /// wrong directory, and git says `fatal: not a git repository`.
+    #[tokio::test]
+    async fn an_agent_added_to_a_workspace_knows_where_its_repositories_are() {
+        let home = TempDir::new().unwrap();
+        let worker = std::sync::Arc::new(Worker::open(home.path()).await.unwrap());
+
+        let first = recorded(&worker, "The one that cut it").await;
+        let workspace = home.path().join("workspace");
+        tokio::fs::create_dir_all(workspace.join("sandbox-firetower"))
+            .await
+            .unwrap();
+        worker
+            .store
+            .record_workspace(&first, workspace.to_str().unwrap(), first.as_str())
+            .await
+            .unwrap();
+        worker
+            .store
+            .record_checkout(
+                &first,
+                0,
+                "kevinpiac/sandbox-firetower",
+                "https://example.invalid/kevinpiac/sandbox-firetower.git",
+                "main",
+                "agent/test-3",
+                "sandbox-firetower",
+            )
+            .await
+            .unwrap();
+
+        let second = recorded(&worker, "The one that joined").await;
+        worker
+            .store
+            .record_workspace(&second, workspace.to_str().unwrap(), second.as_str())
+            .await
+            .unwrap();
+
+        // What `start_agent` does for a second agent, which it did not before.
+        for (position, c) in worker
+            .store
+            .checkouts_of(&first)
+            .await
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            worker
+                .store
+                .record_checkout(
+                    &second,
+                    position as i64,
+                    &c.slug,
+                    &c.remote,
+                    &c.base,
+                    &c.branch,
+                    &c.path,
+                )
+                .await
+                .unwrap();
+        }
+
+        let mine = worker.store.checkouts_of(&second).await.unwrap();
+        assert_eq!(
+            mine.len(),
+            1,
+            "the joining agent has the workspace's repositories"
+        );
+        assert_eq!(
+            mine[0].path, "sandbox-firetower",
+            "and above all where it is — an empty path here is the workspace root, \
+             which is the wrong directory and the whole of this bug"
+        );
+
+        // The summary now reaches a real worktree rather than the root. It is
+        // not a git repository in this fixture either, but the difference is
+        // the one that matters: a row carrying git's sentence, not a failed
+        // request that the control plane reports as an unreachable machine.
+        let summaries = worker
+            .summarize(&second)
+            .await
+            .expect("reported, not fatal");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].slug, "kevinpiac/sandbox-firetower");
+        assert!(summaries[0].trouble.is_some());
+    }
+
+    /// The same tolerance for a workspace with no checkout rows at all.
+    ///
+    /// A `?` here failed the whole request, and `session_work` stamped that
+    /// `HostUnreachable` — so a machine that answered was reported as gone.
+    #[tokio::test]
+    async fn a_workspace_that_is_not_a_repository_is_reported_not_fatal() {
+        let home = TempDir::new().unwrap();
+        let worker = std::sync::Arc::new(Worker::open(home.path()).await.unwrap());
+        // With a branch and a base: `refs_of` reads them off the session row,
+        // and without them `summarize` answers "nothing here" long before it
+        // reaches the branch under test.
+        let session = SessionId::new();
+        worker
+            .store
+            .create_session(
+                &session,
+                None,
+                "No checkouts recorded",
+                "do a thing",
+                Some("agent/test-3"),
+                Some("main"),
+                "Shell",
+                WorkspaceSize::Small,
+            )
+            .await
+            .unwrap();
+
+        let workspace = home.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        worker
+            .store
+            .record_workspace(&session, workspace.to_str().unwrap(), session.as_str())
+            .await
+            .unwrap();
+        let summaries = worker
+            .summarize(&session)
+            .await
+            .expect("a workspace git cannot read is an answer, not an error");
+        assert_eq!(summaries.len(), 1);
+        assert!(
+            summaries[0].trouble.is_some(),
+            "carrying what git actually said"
+        );
     }
 
     /// A checkout git cannot read is news, not silence.

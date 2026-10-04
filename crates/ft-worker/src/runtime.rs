@@ -154,6 +154,7 @@ pub async fn install(state: &Path, kind: Agent, version: Option<&str>) -> Result
         Agent::ClaudeCode => fetch_claude(&bin, &platform, version).await,
         Agent::Codex => fetch_codex(&bin, &platform, version).await,
         Agent::KimiCode => fetch_kimi(&bin, &platform, version).await,
+        Agent::CursorAgent => fetch_cursor(&bin, &platform, version).await,
         Agent::Shell => unreachable!("refused above"),
     };
     if let Err(e) = fetched {
@@ -200,6 +201,7 @@ fn directory(kind: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Shell => "shell",
         Agent::KimiCode => "kimi",
+        Agent::CursorAgent => "cursor-agent",
     }
 }
 
@@ -295,23 +297,78 @@ impl Platform {
 
 // ── Claude Code ──────────────────────────────────────────────────────
 
-/// Where Claude Code publishes its native binaries.
+/// Where each of them publishes itself.
 ///
-/// The same service and the same layout its own installer reads: `latest` is
-/// a version, `<version>/manifest.json` carries a checksum per platform, and
-/// the binary is at `<version>/<platform>/claude`.
-const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
-/// Where Kimi Code publishes its native binaries.
-///
-/// The same service and the same layout its own `install.sh` reads: `latest`
-/// is a version, `binaries/<version>/manifest.json` carries a checksum per
-/// platform, and the binary is in `binaries/<version>/kimi-code-<platform>.tar.gz`.
-///
-/// `code.kimi.ai` is the global mirror of `code.kimi.com`; the two serve the
-/// same builds, and the checksum below is what decides whether to believe
-/// either of them. Which Kimi an *account* lives on is a separate question,
-/// settled per sign-in by [`crate::kimi`]'s `--region`.
-const KIMI_RELEASES: &str = "https://code.kimi.ai/kimi-code";
+/// In `ft-core` rather than here because the control plane asks the same
+/// services what the newest version is, so it can say when a host is behind
+/// one — and two copies of an address is how the two come to disagree about
+/// where an agent comes from. The layout each one serves is documented there.
+use ft_core::releases::{looks_like_a_version, version_in, CLAUDE_RELEASES, KIMI_RELEASES};
+
+/// Pinned official CLI build. Cursor does not publish a signed checksum
+/// manifest, so only platform archives whose digest we verified are offered.
+const CURSOR_BUILD: &str = "2026.09.28-64d2043";
+const CURSOR_DOWNLOADS: &str = "https://downloads.cursor.com/lab";
+
+async fn fetch_cursor(bin: &Path, platform: &Platform, version: Option<&str>) -> Result<()> {
+    let build = version.unwrap_or(CURSOR_BUILD);
+    anyhow::ensure!(
+        build == CURSOR_BUILD,
+        "Cursor Agent build {build} has no verified checksum"
+    );
+    let (os, arch, expected) = match (platform.os, platform.arch, platform.musl) {
+        (Os::Darwin, Arch::Aarch64, _) => (
+            "darwin",
+            "arm64",
+            "c0d7e9cd2e62438610b886d3439907dc1f98c2923b07b3a41416cc919aaf53c7",
+        ),
+        (Os::Darwin, Arch::X86_64, _) => (
+            "darwin",
+            "x64",
+            "3efe0dff2f3d92a1e8139e33fef182801556b57ed50a6afd7bac19c4fad09549",
+        ),
+        (Os::Linux, Arch::X86_64, false) => (
+            "linux",
+            "x64",
+            "6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f0455d9559f0",
+        ),
+        (Os::Linux, Arch::Aarch64, false) => (
+            "linux",
+            "arm64",
+            "c737599b27d3d8d6743c72b487204e335f3a8ea2fdbaf18302ee207a646ffd8d",
+        ),
+        _ => bail!("Cursor Agent has no verified archive for this platform"),
+    };
+    let archive = bin.join(".cursor-agent-package.tar.gz");
+    let url = format!("{CURSOR_DOWNLOADS}/{build}/{os}/{arch}/agent-cli-package.tar.gz");
+    download(&url, &archive).await?;
+    anyhow::ensure!(
+        sha256_of(&archive).await? == expected,
+        "Cursor Agent archive checksum mismatch"
+    );
+    let output = Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(bin)
+        .args(["--strip-components=1"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .context("unpacking Cursor Agent")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Cursor Agent archive could not be unpacked: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    tokio::fs::remove_file(&archive).await?;
+    let agent = bin.join("cursor-agent");
+    anyhow::ensure!(
+        tokio::fs::metadata(&agent).await?.is_file(),
+        "Cursor Agent archive has no launcher"
+    );
+    executable(&agent).await
+}
 
 /// Kimi Code, from its download service.
 ///
@@ -441,8 +498,7 @@ async fn fetch_claude(bin: &Path, platform: &Platform, version: Option<&str>) ->
 
 // ── Codex ────────────────────────────────────────────────────────────
 
-/// Where Codex publishes its binaries: one tarball per target on each release.
-const CODEX_RELEASES: &str = "https://github.com/openai/codex/releases";
+use ft_core::releases::CODEX_RELEASES;
 
 /// The sidecar Codex runs its tools through, and the second half of Codex.
 ///
@@ -675,27 +731,6 @@ async fn version_of(binary: &Path) -> Option<String> {
         return None;
     }
     version_in(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn version_in(said: &str) -> Option<String> {
-    said.split_whitespace()
-        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.'))
-        .map(|word| word.strip_prefix('v').unwrap_or(word))
-        .find(|word| looks_like_a_version(word))
-        .map(str::to_string)
-}
-
-fn looks_like_a_version(word: &str) -> bool {
-    let mut parts = word.split('.');
-    let mut count = 0;
-    for part in parts.by_ref() {
-        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if digits.is_empty() {
-            return false;
-        }
-        count += 1;
-    }
-    count >= 2
 }
 
 #[cfg(test)]
